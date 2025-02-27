@@ -3,3 +3,7 @@ dist
 .env
 .DS_Store
 /supabase/.temp
+
+# Bolt files
+.bolt/
+.bolt/**/*

@@ -1,402 +1,320 @@
 import React, { useState, useEffect } from 'react';
-import { supabase } from '../lib/supabase';
+import { supabase } from '../lib/supabaseClient';
+
+// Definir los tipos de movimiento exactamente como están en la restricción CHECK de la base de datos
+const TIPOS_MOVIMIENTO = ['ENTRADA', 'MOVIMIENTO_INTERNO', 'SALIDA'] as const;
+type TipoMovimiento = typeof TIPOS_MOVIMIENTO[number];
 
 interface Producto {
   id: string;
   codigo: string;
   nombre: string;
-  stock: number;
 }
 
-interface Deposito {
-  id: string;
-  nombre: string;
-}
-
-interface Posicion {
-  id: string;
-  rack: string;
-  columna: string;
-  nivel: number;
-  profundidad: number;
-}
-
-interface Movimiento {
-  id: string;
-  tipo: 'ENTRADA' | 'SALIDA' | 'TRASLADO';
+interface PalletItem {
   producto_id: string;
-  deposito_origen_id?: string;
-  deposito_destino_id?: string;
-  posicion_origen_id?: string;
-  posicion_destino_id?: string;
   cantidad: number;
-  observaciones?: string;
+  lote: string;
+  fecha_fabricacion: string;
+  fecha_vencimiento: string;
 }
 
-interface Props {
-  movimiento?: Movimiento | null;
-  onSuccess?: () => void;
+interface MovimientoFormProps {
+  onSuccess: () => void;
 }
 
-const MovimientoForm: React.FC<Props> = ({ movimiento, onSuccess }) => {
-  const [formData, setFormData] = useState<Omit<Movimiento, 'id'>>({
-    tipo: 'ENTRADA',
-    producto_id: '',
-    deposito_origen_id: '',
-    deposito_destino_id: '',
-    posicion_origen_id: '',
-    posicion_destino_id: '',
-    cantidad: 1,
-    observaciones: ''
-  });
-
+const MovimientoForm: React.FC<MovimientoFormProps> = ({ onSuccess }) => {
+  const [tipoMovimiento, setTipoMovimiento] = useState<TipoMovimiento>('ENTRADA');
   const [productos, setProductos] = useState<Producto[]>([]);
-  const [depositos, setDepositos] = useState<Deposito[]>([]);
-  const [posicionesOrigen, setPosicionesOrigen] = useState<Posicion[]>([]);
-  const [posicionesDestino, setPosicionesDestino] = useState<Posicion[]>([]);
+  const [pallets, setPallets] = useState<PalletItem[]>([]);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [cantidadMovimiento, setCantidadMovimiento] = useState<number>(0);
 
   useEffect(() => {
     fetchProductos();
-    fetchDepositos();
   }, []);
-
-  useEffect(() => {
-    if (movimiento) {
-      setFormData({
-        tipo: movimiento.tipo,
-        producto_id: movimiento.producto_id,
-        deposito_origen_id: movimiento.deposito_origen_id || '',
-        deposito_destino_id: movimiento.deposito_destino_id || '',
-        posicion_origen_id: movimiento.posicion_origen_id || '',
-        posicion_destino_id: movimiento.posicion_destino_id || '',
-        cantidad: movimiento.cantidad,
-        observaciones: movimiento.observaciones || ''
-      });
-    }
-  }, [movimiento]);
-
-  useEffect(() => {
-    if (formData.deposito_origen_id) {
-      fetchPosiciones(formData.deposito_origen_id, 'origen');
-    }
-    if (formData.deposito_destino_id) {
-      fetchPosiciones(formData.deposito_destino_id, 'destino');
-    }
-  }, [formData.deposito_origen_id, formData.deposito_destino_id]);
 
   const fetchProductos = async () => {
     try {
       const { data, error } = await supabase
         .from('productos')
-        .select('id, codigo, nombre, stock')
-        .order('nombre');
-
+        .select('id, codigo, nombre');
       if (error) throw error;
       setProductos(data || []);
     } catch (error: any) {
-      console.error('Error al cargar productos:', error);
+      setError('Error al cargar productos');
+      console.error('Error:', error);
     }
   };
 
-  const fetchDepositos = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('depositos')
-        .select('id, nombre')
-        .order('nombre');
+  // Actualizar la cantidad total del movimiento cuando cambian los pallets
+  useEffect(() => {
+    const total = pallets.reduce((sum, pallet) => sum + pallet.cantidad, 0);
+    setCantidadMovimiento(total);
+  }, [pallets]);
 
-      if (error) throw error;
-      setDepositos(data || []);
-    } catch (error: any) {
-      console.error('Error al cargar depósitos:', error);
-    }
-  };
-
-  const fetchPosiciones = async (depositoId: string, tipo: 'origen' | 'destino') => {
-    try {
-      const { data, error } = await supabase
-        .from('posiciones')
-        .select('id, rack, columna, nivel, profundidad')
-        .eq('deposito_id', depositoId)
-        .order('rack')
-        .order('columna')
-        .order('nivel')
-        .order('profundidad');
-
-      if (error) throw error;
-      
-      if (tipo === 'origen') {
-        setPosicionesOrigen(data || []);
-      } else {
-        setPosicionesDestino(data || []);
-      }
-    } catch (error: any) {
-      console.error('Error al cargar posiciones:', error);
-    }
+  const validatePallet = (pallet: PalletItem): string | null => {
+    if (!pallet.producto_id) return 'Debe seleccionar un producto';
+    if (!pallet.lote) return 'Debe especificar un lote';
+    if (pallet.cantidad <= 0) return 'Debe especificar una cantidad válida';
+    if (!pallet.fecha_fabricacion) return 'Debe especificar fecha de fabricación';
+    if (!pallet.fecha_vencimiento) return 'Debe especificar fecha de vencimiento';
+    return null;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsLoading(true);
+    if (pallets.length === 0) {
+      setError('Debe agregar al menos un pallet');
+      return;
+    }
+
+    // Validar todos los pallets
+    for (const pallet of pallets) {
+      const validationError = validatePallet(pallet);
+      if (validationError) {
+        setError(validationError);
+        return;
+      }
+    }
+
+    setLoading(true);
     setError(null);
 
     try {
-      // Validaciones según el tipo de movimiento
-      if (formData.tipo === 'ENTRADA' && !formData.deposito_destino_id) {
-        throw new Error('Debe seleccionar un depósito destino para la entrada');
-      }
-      if (formData.tipo === 'SALIDA' && !formData.deposito_origen_id) {
-        throw new Error('Debe seleccionar un depósito origen para la salida');
-      }
-      if (formData.tipo === 'TRASLADO' && (!formData.deposito_origen_id || !formData.deposito_destino_id)) {
-        throw new Error('Debe seleccionar depósito origen y destino para el traslado');
+      // Verificar que el tipo de movimiento sea uno de los permitidos
+      if (!TIPOS_MOVIMIENTO.includes(tipoMovimiento as TipoMovimiento)) {
+        throw new Error(`Tipo de movimiento inválido: ${tipoMovimiento}. Debe ser uno de: ${TIPOS_MOVIMIENTO.join(', ')}`);
       }
 
-      const movimientoData = {
-        ...formData,
-        deposito_origen_id: formData.deposito_origen_id || null,
-        deposito_destino_id: formData.deposito_destino_id || null,
-        posicion_origen_id: formData.posicion_origen_id || null,
-        posicion_destino_id: formData.posicion_destino_id || null,
-      };
-
-      if (movimiento?.id) {
-        const { error: updateError } = await supabase
-          .from('movimientos')
-          .update(movimientoData)
-          .eq('id', movimiento.id);
-
-        if (updateError) throw updateError;
-      } else {
-        const { error: insertError } = await supabase
-          .from('movimientos')
-          .insert([movimientoData]);
-
-        if (insertError) throw insertError;
-      }
-
-      // Actualizar stock del producto
-      const producto = productos.find(p => p.id === formData.producto_id);
-      if (producto) {
-        let nuevoStock = producto.stock;
-        
-        if (formData.tipo === 'ENTRADA') {
-          nuevoStock += formData.cantidad;
-        } else if (formData.tipo === 'SALIDA') {
-          nuevoStock -= formData.cantidad;
-        }
-        // En caso de traslado, el stock total no cambia
-
-        if (nuevoStock < 0) {
-          throw new Error('No hay suficiente stock disponible');
-        }
-
-        const { error: stockError } = await supabase
-          .from('productos')
-          .update({ stock: nuevoStock })
-          .eq('id', formData.producto_id);
-
-        if (stockError) throw stockError;
-      }
-
-      if (onSuccess) onSuccess();
+      console.log('Tipo de movimiento:', tipoMovimiento);
+      console.log('Cantidad total:', cantidadMovimiento);
       
-      setFormData({
-        tipo: 'ENTRADA',
-        producto_id: '',
-        deposito_origen_id: '',
-        deposito_destino_id: '',
-        posicion_origen_id: '',
-        posicion_destino_id: '',
-        cantidad: 1,
-        observaciones: ''
-      });
+      // Crear el movimiento con los datos exactos que espera la base de datos
+      const movimientoData = {
+        tipo: tipoMovimiento,
+        fecha: new Date().toISOString(),
+        cantidad: cantidadMovimiento || 1 // Asegurarse de que nunca sea 0 o null
+      };
+      
+      console.log('Datos a insertar para movimiento:', movimientoData);
+
+      // Crear el movimiento
+      const { data: movimiento, error: movError } = await supabase
+        .from('movimientos')
+        .insert(movimientoData)
+        .select()
+        .single();
+
+      if (movError) {
+        console.error('Error al crear movimiento:', movError);
+        throw movError;
+      }
+
+      console.log('Movimiento creado con éxito:', movimiento);
+
+      // Preparar los pallets con los datos correctos según la estructura real de la tabla
+      const palletsData = pallets.map(pallet => ({
+        producto_id: pallet.producto_id,
+        cantidad: pallet.cantidad,
+        lote: pallet.lote,
+        estado: 'POR_UBICAR', // Estado válido según la base de datos
+        fecha_fabricacion: new Date(pallet.fecha_fabricacion).toISOString(),
+        fecha_vencimiento: new Date(pallet.fecha_vencimiento).toISOString(),
+        codigo: `P-${Date.now()}-${Math.floor(Math.random() * 1000)}`, // Generar un código único
+        descripcion: `Pallet de ${productos.find(p => p.id === pallet.producto_id)?.nombre || 'producto'} - Lote: ${pallet.lote}`,
+        unidad_medida: 'UNIDAD' // Valor por defecto para unidad_medida
+      }));
+
+      console.log('Datos a insertar para pallets:', palletsData);
+
+      // Crear los pallets
+      const { data: palletsInserted, error: palletsError } = await supabase
+        .from('pallets')
+        .insert(palletsData)
+        .select(); // Añadir .select() para ver los datos insertados
+
+      if (palletsError) {
+        console.error('Error al crear pallets:', palletsError);
+        throw palletsError;
+      }
+
+      console.log('Pallets creados con éxito:', palletsInserted);
+      onSuccess();
+      setPallets([]);
+      setTipoMovimiento('ENTRADA');
+      setCantidadMovimiento(0);
     } catch (error: any) {
-      setError(error.message);
-      console.error('Error:', error);
+      console.error('Error completo:', error);
+      setError('Error al guardar el movimiento: ' + (error.message || error.details || JSON.stringify(error)));
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   };
 
-  const formatPosicion = (posicion: Posicion) => {
-    return `${posicion.rack}${posicion.columna}${posicion.nivel}${posicion.profundidad}`;
+  const addPallet = () => {
+    setPallets([...pallets, {
+      producto_id: '',
+      cantidad: 0,
+      lote: '',
+      fecha_fabricacion: '',
+      fecha_vencimiento: ''
+    }]);
+  };
+
+  const updatePallet = (index: number, field: keyof PalletItem, value: any) => {
+    const newPallets = [...pallets];
+    newPallets[index] = {
+      ...newPallets[index],
+      [field]: value
+    };
+    setPallets(newPallets);
+  };
+
+  const removePallet = (index: number) => {
+    setPallets(pallets.filter((_, i) => i !== index));
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6">
+    <form onSubmit={handleSubmit} className="space-y-6 bg-white shadow-sm rounded-lg p-6">
       {error && (
         <div className="bg-red-50 border-l-4 border-red-400 p-4">
-          <div className="flex">
-            <div className="ml-3">
-              <p className="text-sm text-red-700">{error}</p>
-            </div>
-          </div>
+          <p className="text-red-700">{error}</p>
         </div>
       )}
 
       <div>
-        <label htmlFor="tipo" className="block text-sm font-medium text-gray-700">
-          Tipo de Movimiento
-        </label>
+        <label className="block text-sm font-medium text-gray-700">Tipo de Movimiento</label>
         <select
-          id="tipo"
-          value={formData.tipo}
-          onChange={(e) => setFormData(prev => ({ ...prev, tipo: e.target.value as Movimiento['tipo'] }))}
-          className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
+          value={tipoMovimiento}
+          onChange={(e) => setTipoMovimiento(e.target.value as TipoMovimiento)}
+          className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
         >
-          <option value="ENTRADA">Entrada</option>
-          <option value="SALIDA">Salida</option>
-          <option value="TRASLADO">Traslado</option>
-        </select>
-      </div>
-
-      <div>
-        <label htmlFor="producto" className="block text-sm font-medium text-gray-700">
-          Producto
-        </label>
-        <select
-          id="producto"
-          value={formData.producto_id}
-          onChange={(e) => setFormData(prev => ({ ...prev, producto_id: e.target.value }))}
-          className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
-          required
-        >
-          <option value="">Seleccione un producto</option>
-          {productos.map((producto) => (
-            <option key={producto.id} value={producto.id}>
-              {producto.codigo} - {producto.nombre} (Stock: {producto.stock})
+          {TIPOS_MOVIMIENTO.map(tipo => (
+            <option key={tipo} value={tipo}>
+              {tipo === 'ENTRADA' ? 'Entrada' : 
+               tipo === 'SALIDA' ? 'Salida' : 'Movimiento Interno'}
             </option>
           ))}
         </select>
       </div>
 
-      {(formData.tipo === 'SALIDA' || formData.tipo === 'TRASLADO') && (
-        <div>
-          <label htmlFor="deposito_origen" className="block text-sm font-medium text-gray-700">
-            Depósito Origen
-          </label>
-          <select
-            id="deposito_origen"
-            value={formData.deposito_origen_id}
-            onChange={(e) => setFormData(prev => ({ ...prev, deposito_origen_id: e.target.value, posicion_origen_id: '' }))}
-            className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
-            required
+      <div className="space-y-4">
+        <div className="flex justify-between items-center">
+          <h3 className="text-lg font-medium">Pallets</h3>
+          <button
+            type="button"
+            onClick={addPallet}
+            className="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
           >
-            <option value="">Seleccione un depósito</option>
-            {depositos.map((deposito) => (
-              <option key={deposito.id} value={deposito.id}>
-                {deposito.nombre}
-              </option>
-            ))}
-          </select>
+            Agregar Pallet
+          </button>
         </div>
-      )}
 
-      {formData.deposito_origen_id && (
-        <div>
-          <label htmlFor="posicion_origen" className="block text-sm font-medium text-gray-700">
-            Posición Origen
-          </label>
-          <select
-            id="posicion_origen"
-            value={formData.posicion_origen_id}
-            onChange={(e) => setFormData(prev => ({ ...prev, posicion_origen_id: e.target.value }))}
-            className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
-          >
-            <option value="">Seleccione una posición</option>
-            {posicionesOrigen.map((posicion) => (
-              <option key={posicion.id} value={posicion.id}>
-                {formatPosicion(posicion)}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
+        {pallets.length > 0 && (
+          <div className="bg-gray-50 p-4 rounded-lg">
+            <p className="text-sm text-gray-700">Cantidad total: <span className="font-bold">{cantidadMovimiento}</span></p>
+          </div>
+        )}
 
-      {(formData.tipo === 'ENTRADA' || formData.tipo === 'TRASLADO') && (
-        <div>
-          <label htmlFor="deposito_destino" className="block text-sm font-medium text-gray-700">
-            Depósito Destino
-          </label>
-          <select
-            id="deposito_destino"
-            value={formData.deposito_destino_id}
-            onChange={(e) => setFormData(prev => ({ ...prev, deposito_destino_id: e.target.value, posicion_destino_id: '' }))}
-            className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
-            required
-          >
-            <option value="">Seleccione un depósito</option>
-            {depositos.map((deposito) => (
-              <option key={deposito.id} value={deposito.id}>
-                {deposito.nombre}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
+        {pallets.map((pallet, index) => (
+          <div key={index} className="border rounded-lg p-4 space-y-4">
+            <div className="flex justify-between items-start">
+              <h4 className="text-sm font-medium">Pallet #{index + 1}</h4>
+              <button
+                type="button"
+                onClick={() => removePallet(index)}
+                className="text-red-600 hover:text-red-800"
+              >
+                Eliminar
+              </button>
+            </div>
 
-      {formData.deposito_destino_id && (
-        <div>
-          <label htmlFor="posicion_destino" className="block text-sm font-medium text-gray-700">
-            Posición Destino
-          </label>
-          <select
-            id="posicion_destino"
-            value={formData.posicion_destino_id}
-            onChange={(e) => setFormData(prev => ({ ...prev, posicion_destino_id: e.target.value }))}
-            className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
-          >
-            <option value="">Seleccione una posición</option>
-            {posicionesDestino.map((posicion) => (
-              <option key={posicion.id} value={posicion.id}>
-                {formatPosicion(posicion)}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Producto <span className="text-red-600">*</span>
+                </label>
+                <select
+                  value={pallet.producto_id}
+                  onChange={(e) => updatePallet(index, 'producto_id', e.target.value)}
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                  required
+                >
+                  <option value="">Seleccione un producto</option>
+                  {productos.map(producto => (
+                    <option key={producto.id} value={producto.id}>
+                      {producto.codigo} - {producto.nombre}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-      <div>
-        <label htmlFor="cantidad" className="block text-sm font-medium text-gray-700">
-          Cantidad
-        </label>
-        <input
-          type="number"
-          id="cantidad"
-          value={formData.cantidad}
-          onChange={(e) => setFormData(prev => ({ ...prev, cantidad: parseFloat(e.target.value) || 0 }))}
-          className="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-          min="0.01"
-          step="0.01"
-          required
-        />
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Lote <span className="text-red-600">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={pallet.lote}
+                  onChange={(e) => updatePallet(index, 'lote', e.target.value)}
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Cantidad <span className="text-red-600">*</span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={pallet.cantidad}
+                  onChange={(e) => updatePallet(index, 'cantidad', parseInt(e.target.value) || 0)}
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Fecha de Fabricación <span className="text-red-600">*</span>
+                </label>
+                <input
+                  type="date"
+                  value={pallet.fecha_fabricacion}
+                  onChange={(e) => updatePallet(index, 'fecha_fabricacion', e.target.value)}
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Fecha de Vencimiento <span className="text-red-600">*</span>
+                </label>
+                <input
+                  type="date"
+                  value={pallet.fecha_vencimiento}
+                  onChange={(e) => updatePallet(index, 'fecha_vencimiento', e.target.value)}
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                  required
+                />
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
 
-      <div>
-        <label htmlFor="observaciones" className="block text-sm font-medium text-gray-700">
-          Observaciones
-        </label>
-        <textarea
-          id="observaciones"
-          value={formData.observaciones}
-          onChange={(e) => setFormData(prev => ({ ...prev, observaciones: e.target.value }))}
-          rows={3}
-          className="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-        />
-      </div>
-
-      <div>
+      <div className="flex justify-end">
         <button
           type="submit"
-          disabled={isLoading}
-          className={`w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 ${
-            isLoading ? 'opacity-50 cursor-not-allowed' : ''
-          }`}
+          disabled={loading || pallets.length === 0}
+          className="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
         >
-          {isLoading ? 'Guardando...' : movimiento ? 'Actualizar Movimiento' : 'Crear Movimiento'}
+          {loading ? 'Guardando...' : 'Guardar Movimiento'}
         </button>
       </div>
     </form>

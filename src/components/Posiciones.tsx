@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { supabase } from '../lib/supabaseClient';
 import RackVisualization from './RackVisualization';
 
 interface Position {
@@ -10,7 +10,8 @@ interface Position {
   profundidad: number;
   estado: string;
   deposito_id: string;
-  idpallet?: string;
+  producto_id?: string;
+  ocupado?: boolean;
 }
 
 interface Deposito {
@@ -55,6 +56,11 @@ const Posiciones: React.FC = () => {
     estado: 'DISPONIBLE',
     deposito_id: ''
   });
+
+  // Estado para pallets disponibles y modal
+  const [availablePallets, setAvailablePallets] = useState<any[]>([]);
+  const [showPalletModal, setShowPalletModal] = useState(false);
+  const [selectedPalletId, setSelectedPalletId] = useState<string>('');
 
   // Función para generar el rango de letras
   const generateLetterRange = (start: string, end: string): string[] => {
@@ -128,6 +134,13 @@ const Posiciones: React.FC = () => {
   const fetchPositions = async () => {
     try {
       setLoading(true);
+      
+      // Solo cargar posiciones si hay un depósito seleccionado
+      if (!selectedDeposito) {
+        setPositions([]);
+        return;
+      }
+      
       let query = supabase
         .from('posiciones')
         .select('*')
@@ -155,7 +168,8 @@ const Posiciones: React.FC = () => {
         const columnas = [...new Set(data.map(p => p.columna))].sort();
       }
     } catch (error: any) {
-      setError(error.message);
+      console.error('Error al cargar posiciones:', error);
+      setError('Error al cargar posiciones: ' + (error.message || error.details || JSON.stringify(error)));
     } finally {
       setLoading(false);
     }
@@ -312,44 +326,139 @@ const Posiciones: React.FC = () => {
   };
 
   // Función para asignar un pallet a una posición
-  const asignarPallet = async (positionId: string, idpallet: string) => {
+  const asignarPallet = async (positionId: string, palletId: string) => {
     try {
-      const { error } = await supabase
+      console.log('Asignando pallet', palletId, 'a posición', positionId);
+      
+      // 1. Obtener información del pallet y su producto asociado
+      const { data: palletData, error: palletFetchError } = await supabase
+        .from('pallets')
+        .select('id, producto_id')
+        .eq('id', palletId)
+        .single();
+        
+      if (palletFetchError) {
+        console.error('Error al obtener pallet:', palletFetchError);
+        throw palletFetchError;
+      }
+      if (!palletData) {
+        throw new Error('No se encontró el pallet');
+      }
+      
+      console.log('Datos del pallet:', palletData);
+      
+      // 2. Actualizar la posición
+      const { error: positionError } = await supabase
         .from('posiciones')
         .update({ 
           estado: 'OCUPADO',
-          idpallet: idpallet 
+          ocupado: true
         })
         .eq('id', positionId);
 
-      if (error) throw error;
+      if (positionError) {
+        console.error('Error al actualizar posición:', positionError);
+        throw positionError;
+      }
+      
+      // 3. Actualizar el pallet
+      const { error: palletUpdateError } = await supabase
+        .from('pallets')
+        .update({ 
+          estado: 'UBICADO',
+          posicion_id: positionId
+        })
+        .eq('id', palletId);
+
+      if (palletUpdateError) {
+        console.error('Error al actualizar pallet:', palletUpdateError);
+        throw palletUpdateError;
+      }
+      
+      console.log('Pallet asignado correctamente');
       
       // Recargar las posiciones
       fetchPositions();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error asignando pallet:', error);
-      setError('Error al asignar pallet');
+      setError('Error al asignar pallet: ' + (error.message || error.details || JSON.stringify(error)));
     }
   };
 
   // Función para liberar una posición
   const liberarPosicion = async (positionId: string) => {
     try {
-      const { error } = await supabase
+      console.log('Liberando posición', positionId);
+      
+      // 1. Obtener la posición para saber qué pallet está asignado
+      const { data: positionData, error: positionFetchError } = await supabase
+        .from('posiciones')
+        .select('*')
+        .eq('id', positionId)
+        .single();
+        
+      if (positionFetchError) {
+        console.error('Error al obtener posición:', positionFetchError);
+        throw positionFetchError;
+      }
+      if (!positionData) {
+        throw new Error('No se encontró la posición');
+      }
+      
+      console.log('Datos de la posición:', positionData);
+      
+      // 2. Actualizar la posición
+      const { error: positionError } = await supabase
         .from('posiciones')
         .update({ 
           estado: 'DISPONIBLE',
-          idpallet: null 
+          ocupado: false
         })
         .eq('id', positionId);
 
-      if (error) throw error;
+      if (positionError) {
+        console.error('Error al actualizar posición:', positionError);
+        throw positionError;
+      }
+      
+      // 3. Buscar y actualizar el pallet asociado a esta posición
+      const { data: palletData, error: palletFetchError } = await supabase
+        .from('pallets')
+        .select('id')
+        .eq('posicion_id', positionId);
+        
+      if (palletFetchError) {
+        console.error('Error al buscar pallets asociados:', palletFetchError);
+        throw palletFetchError;
+      }
+      
+      if (palletData && palletData.length > 0) {
+        console.log('Pallets encontrados para liberar:', palletData);
+        
+        // Actualizar el pallet para marcarlo como POR_UBICAR
+        const { error: palletUpdateError } = await supabase
+          .from('pallets')
+          .update({ 
+            estado: 'POR_UBICAR',
+            posicion_id: null
+          })
+          .eq('posicion_id', positionId);
+  
+        if (palletUpdateError) {
+          console.error('Error al actualizar pallet:', palletUpdateError);
+          throw palletUpdateError;
+        }
+        
+        console.log('Pallets liberados correctamente');
+      } else {
+        console.log('No se encontraron pallets asociados a esta posición');
+      }
       
       // Recargar las posiciones
       fetchPositions();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error liberando posición:', error);
-      setError('Error al liberar posición');
+      setError('Error al liberar posición: ' + (error.message || error.details || JSON.stringify(error)));
     }
   };
 
@@ -359,15 +468,71 @@ const Posiciones: React.FC = () => {
     
     // Si la posición está disponible, mostrar diálogo para asignar pallet
     if (position.estado === 'DISPONIBLE') {
-      const idpallet = prompt('Ingrese el ID del pallet a asignar:');
-      if (idpallet) {
-        asignarPallet(position.id, idpallet);
-      }
-    } else {
-      // Si la posición está ocupada, preguntar si desea liberar
-      if (confirm('¿Desea liberar esta posición?')) {
+      // En lugar de usar prompt, vamos a cargar los pallets disponibles
+      loadAvailablePallets();
+      // El resto de la lógica se manejará en el modal
+    } else if (position.estado === 'OCUPADO') {
+      // Si la posición está ocupada, mostrar información y preguntar si desea liberar
+      const confirmMessage = `Esta posición está ocupada.\n\n¿Desea liberar esta posición?`;
+      if (confirm(confirmMessage)) {
         liberarPosicion(position.id);
       }
+    }
+  };
+
+  // Función para cargar los pallets disponibles (estado = POR_UBICAR)
+  const loadAvailablePallets = async () => {
+    try {
+      console.log('Cargando pallets disponibles');
+      
+      const { data, error } = await supabase
+        .from('pallets')
+        .select(`
+          id, 
+          codigo, 
+          descripcion, 
+          producto_id, 
+          cantidad, 
+          lote,
+          producto:producto_id (
+            id,
+            codigo,
+            nombre
+          )
+        `)
+        .eq('estado', 'POR_UBICAR');
+      
+      if (error) {
+        console.error('Error al cargar pallets disponibles:', error);
+        throw error;
+      }
+      
+      console.log('Pallets disponibles:', data);
+      
+      setAvailablePallets(data || []);
+      setShowPalletModal(true);
+    } catch (error: any) {
+      console.error('Error cargando pallets disponibles:', error);
+      setError('Error al cargar pallets disponibles: ' + (error.message || error.details || JSON.stringify(error)));
+    }
+  };
+
+  // Función para asignar el pallet seleccionado
+  const assignSelectedPallet = async () => {
+    if (!selectedPosition || !selectedPalletId) return;
+    
+    try {
+      console.log('Asignando pallet', selectedPalletId, 'a posición', selectedPosition.id);
+      
+      // Usar la función existente para asignar el pallet
+      await asignarPallet(selectedPosition.id, selectedPalletId);
+      
+      // Cerrar el modal y recargar las posiciones
+      setShowPalletModal(false);
+      setSelectedPalletId('');
+    } catch (error: any) {
+      console.error('Error completo al asignar pallet:', error);
+      setError('Error al asignar pallet: ' + (error.message || error.details || JSON.stringify(error)));
     }
   };
 
@@ -587,6 +752,45 @@ const Posiciones: React.FC = () => {
         </div>
       )}
 
+      {selectedDeposito && showPalletModal && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full flex items-center justify-center">
+          <div className="bg-white p-8 rounded-lg shadow-xl max-w-2xl w-full">
+            <h2 className="text-2xl font-bold mb-6">Asignar Pallet</h2>
+            <div className="space-y-6">
+              <p>Seleccione un pallet disponible:</p>
+              <select
+                value={selectedPalletId}
+                onChange={(e) => setSelectedPalletId(e.target.value)}
+                className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+              >
+                <option value="">Seleccione un pallet</option>
+                {availablePallets.map((pallet) => (
+                  <option key={pallet.id} value={pallet.id}>
+                    {pallet.codigo} - {pallet.producto?.nombre || 'Sin producto'} - Lote: {pallet.lote} - Cant: {pallet.cantidad}
+                  </option>
+                ))}
+              </select>
+              <div className="flex justify-end space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPalletModal(false)}
+                  className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={assignSelectedPallet}
+                  className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                >
+                  Asignar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {selectedDeposito && (show3D ? (
         <RackVisualization
           positions={filteredPositions}
@@ -608,9 +812,7 @@ const Posiciones: React.FC = () => {
                 {position.rack}{position.columna}{position.nivel}{position.profundidad}
               </h3>
               <p className="text-sm">Estado: {position.estado}</p>
-              {position.idpallet && (
-                <p className="text-sm">Pallet: {position.idpallet}</p>
-              )}
+              <p className="text-sm">Ocupado: {position.ocupado ? 'Sí' : 'No'}</p>
             </div>
           ))}
         </div>
